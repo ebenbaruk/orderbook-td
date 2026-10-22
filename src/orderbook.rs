@@ -1,32 +1,49 @@
 use crate::interfaces::{OrderBook, Price, Quantity, Side, Update};
 
 pub struct OrderBookImpl {
+    // both lists are sorted from lowest to highest price
     bids: Vec<(Price, Quantity)>,
 
     asks: Vec<(Price, Quantity)>,
 }
 
 impl OrderBookImpl {
-    // put a quantity at a price, or add the price if it is not in the list
-    fn set_level(levels: &mut Vec<(Price, Quantity)>, price: Price, quantity: Quantity) {
-        for i in 0..levels.len() {
-            if levels[i].0 == price {
-                levels[i].1 = quantity;
-                return;
+    // binary search: give the index where the price is,
+    // or where it should be added to keep the list sorted
+    fn find_index(levels: &Vec<(Price, Quantity)>, price: Price) -> usize {
+        let mut low = 0;
+        let mut high = levels.len();
+
+        while low < high {
+            let middle = (low + high) / 2;
+
+            if levels[middle].0 < price {
+                low = middle + 1;
+            } else {
+                high = middle;
             }
         }
+        low
+    }
 
-        levels.push((price, quantity));
+    // put a quantity at a price, or add the price if it is not in the list
+    fn set_level(levels: &mut Vec<(Price, Quantity)>, price: Price, quantity: Quantity) {
+        let i = Self::find_index(levels, price);
+
+        if i < levels.len() && levels[i].0 == price {
+            levels[i].1 = quantity;
+            return;
+        }
+
+        levels.insert(i, (price, quantity));
     }
 
     // remove a price from the list if it is there
     fn remove_level(levels: &mut Vec<(Price, Quantity)>, price: Price) {
-        for i in 0..levels.len() {
-            if levels[i].0 == price {
-                levels.remove(i);
+        let i = Self::find_index(levels, price);
 
-                return;
-            }
+        if i < levels.len() && levels[i].0 == price {
+            levels.remove(i);
         }
     }
 }
@@ -82,35 +99,21 @@ impl OrderBook for OrderBookImpl {
     }
 
     fn get_best_bid(&self) -> Option<Price> {
-        // the best bid is the highest price
+        // the best bid is the highest price, so the last one
         if self.bids.len() == 0 {
             return None;
         }
 
-        let mut best = self.bids[0].0;
-
-        for i in 0..self.bids.len() {
-            if self.bids[i].0 > best {
-                best = self.bids[i].0;
-            }
-        }
-        Some(best)
+        Some(self.bids[self.bids.len() - 1].0)
     }
 
     fn get_best_ask(&self) -> Option<Price> {
-        // the best ask is the lowest price
+        // the best ask is the lowest price, so the first one
         if self.asks.len() == 0 {
             return None;
         }
 
-        let mut best = self.asks[0].0;
-
-        for i in 0..self.asks.len() {
-            if self.asks[i].0 < best {
-                best = self.asks[i].0;
-            }
-        }
-        Some(best)
+        Some(self.asks[0].0)
     }
 
     fn get_quantity_at(&self, price: Price, side: Side) -> Option<Quantity> {
@@ -120,38 +123,36 @@ impl OrderBook for OrderBookImpl {
             &self.asks
         };
 
-        for i in 0..levels.len() {
-            if levels[i].0 == price {
-                return Some(levels[i].1);
-            }
+        let i = Self::find_index(levels, price);
+
+        if i < levels.len() && levels[i].0 == price {
+            return Some(levels[i].1);
         }
 
         None
     }
 
     fn get_top_levels(&self, side: Side, n: usize) -> Vec<(Price, Quantity)> {
-        let mut sorted = if side == Side::Bid {
-            self.bids.clone()
-        } else {
-            self.asks.clone()
-        };
-
-        // sort from lowest to highest price
-        sorted.sort();
-
-        if side == Side::Bid {
-            // bids: from highest to lowest price
-            sorted.reverse();
-        }
-
         let mut levels = Vec::new();
 
-        for i in 0..sorted.len() {
-            if levels.len() == n {
-                break;
-            }
+        if side == Side::Bid {
+            // bids: start from the end of the list
+            for i in 0..self.bids.len() {
+                if levels.len() == n {
+                    break;
+                }
 
-            levels.push(sorted[i]);
+                levels.push(self.bids[self.bids.len() - 1 - i]);
+            }
+        } else {
+            // asks: start from the beginning of the list
+            for i in 0..self.asks.len() {
+                if levels.len() == n {
+                    break;
+                }
+
+                levels.push(self.asks[i]);
+            }
         }
 
         levels
