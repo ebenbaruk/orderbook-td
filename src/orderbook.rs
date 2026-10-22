@@ -1,49 +1,151 @@
 use crate::interfaces::{OrderBook, Price, Quantity, Side, Update};
 
 pub struct OrderBookImpl {
-    // both lists are sorted from lowest to highest price
-    bids: Vec<(Price, Quantity)>,
+    // the quantity of a price is at index (price - base_price)
+    // a quantity of 0 means there is no level at this price
+    bid_quantities: Vec<Quantity>,
 
-    asks: Vec<(Price, Quantity)>,
+    ask_quantities: Vec<Quantity>,
+
+    // the price at index 0, the same for both sides
+    base_price: Price,
+
+    // we keep the best prices so we don't have to search for them
+    best_bid: Option<Price>,
+
+    best_ask: Option<Price>,
 }
 
 impl OrderBookImpl {
-    // binary search: give the index where the price is,
-    // or where it should be added to keep the list sorted
-    fn find_index(levels: &Vec<(Price, Quantity)>, price: Price) -> usize {
-        let mut low = 0;
-        let mut high = levels.len();
+    fn is_in_range(&self, price: Price) -> bool {
+        let last_price = self.base_price + self.bid_quantities.len() as Price - 1;
 
-        while low < high {
-            let middle = (low + high) / 2;
-
-            if levels[middle].0 < price {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        low
+        price >= self.base_price && price <= last_price
     }
 
-    // put a quantity at a price, or add the price if it is not in the list
-    fn set_level(levels: &mut Vec<(Price, Quantity)>, price: Price, quantity: Quantity) {
-        let i = Self::find_index(levels, price);
-
-        if i < levels.len() && levels[i].0 == price {
-            levels[i].1 = quantity;
+    // make the lists bigger so that the price fits in them
+    fn make_room(&mut self, price: Price) {
+        if self.bid_quantities.len() == 0 {
+            self.base_price = price;
+            self.bid_quantities.push(0);
+            self.ask_quantities.push(0);
             return;
         }
 
-        levels.insert(i, (price, quantity));
+        if price < self.base_price {
+            // add zeros at the beginning
+            let extra = (self.base_price - price) as usize;
+
+            let mut new_bids = Vec::new();
+            let mut new_asks = Vec::new();
+
+            for _ in 0..extra {
+                new_bids.push(0);
+                new_asks.push(0);
+            }
+
+            for i in 0..self.bid_quantities.len() {
+                new_bids.push(self.bid_quantities[i]);
+                new_asks.push(self.ask_quantities[i]);
+            }
+
+            self.bid_quantities = new_bids;
+            self.ask_quantities = new_asks;
+            self.base_price = price;
+        }
+
+        let last_price = self.base_price + self.bid_quantities.len() as Price - 1;
+
+        if price > last_price {
+            // add zeros at the end
+            let extra = (price - last_price) as usize;
+
+            for _ in 0..extra {
+                self.bid_quantities.push(0);
+                self.ask_quantities.push(0);
+            }
+        }
     }
 
-    // remove a price from the list if it is there
-    fn remove_level(levels: &mut Vec<(Price, Quantity)>, price: Price) {
-        let i = Self::find_index(levels, price);
+    fn set_bid(&mut self, price: Price, quantity: Quantity) {
+        if !self.is_in_range(price) {
+            self.make_room(price);
+        }
 
-        if i < levels.len() && levels[i].0 == price {
-            levels.remove(i);
+        let i = (price - self.base_price) as usize;
+        self.bid_quantities[i] = quantity;
+
+        // the best bid is the highest price
+        if self.best_bid.is_none() || price > self.best_bid.unwrap() {
+            self.best_bid = Some(price);
+        }
+    }
+
+    fn set_ask(&mut self, price: Price, quantity: Quantity) {
+        if !self.is_in_range(price) {
+            self.make_room(price);
+        }
+
+        let i = (price - self.base_price) as usize;
+        self.ask_quantities[i] = quantity;
+
+        // the best ask is the lowest price
+        if self.best_ask.is_none() || price < self.best_ask.unwrap() {
+            self.best_ask = Some(price);
+        }
+    }
+
+    fn remove_bid(&mut self, price: Price) {
+        if !self.is_in_range(price) {
+            return;
+        }
+
+        let i = (price - self.base_price) as usize;
+
+        if self.bid_quantities[i] == 0 {
+            return;
+        }
+
+        self.bid_quantities[i] = 0;
+
+        if self.best_bid == Some(price) {
+            // look for the next best bid, below this price
+            self.best_bid = None;
+
+            for k in 1..=i {
+                let j = i - k;
+
+                if self.bid_quantities[j] > 0 {
+                    self.best_bid = Some(self.base_price + j as Price);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn remove_ask(&mut self, price: Price) {
+        if !self.is_in_range(price) {
+            return;
+        }
+
+        let i = (price - self.base_price) as usize;
+
+        if self.ask_quantities[i] == 0 {
+            return;
+        }
+
+        self.ask_quantities[i] = 0;
+
+        if self.best_ask == Some(price) {
+            // look for the next best ask, above this price
+            self.best_ask = None;
+
+            for j in (i + 1)..self.ask_quantities.len() {
+                if self.ask_quantities[j] > 0 {
+                    self.best_ask = Some(self.base_price + j as Price);
+                    break;
+                }
+            }
         }
     }
 }
@@ -51,9 +153,15 @@ impl OrderBookImpl {
 impl OrderBook for OrderBookImpl {
     fn new() -> Self {
         OrderBookImpl {
-            bids: Vec::new(),
+            bid_quantities: Vec::new(),
 
-            asks: Vec::new(),
+            ask_quantities: Vec::new(),
+
+            base_price: 0,
+
+            best_bid: None,
+
+            best_ask: None,
         }
     }
 
@@ -64,94 +172,105 @@ impl OrderBook for OrderBookImpl {
                 quantity,
                 side,
             } => {
-                let levels = if side == Side::Bid {
-                    &mut self.bids
+                if side == Side::Bid {
+                    if quantity == 0 {
+                        self.remove_bid(price);
+                    } else {
+                        self.set_bid(price, quantity);
+                    }
                 } else {
-                    &mut self.asks
-                };
-
-                if quantity == 0 {
-                    Self::remove_level(levels, price);
-                } else {
-                    Self::set_level(levels, price, quantity);
+                    if quantity == 0 {
+                        self.remove_ask(price);
+                    } else {
+                        self.set_ask(price, quantity);
+                    }
                 }
             }
 
             Update::Remove { price, side } => {
                 if side == Side::Bid {
-                    Self::remove_level(&mut self.bids, price);
+                    self.remove_bid(price);
                 } else {
-                    Self::remove_level(&mut self.asks, price);
+                    self.remove_ask(price);
                 }
             }
         }
     }
 
     fn get_spread(&self) -> Option<Price> {
-        let best_bid = self.get_best_bid();
-        let best_ask = self.get_best_ask();
-
-        if best_bid.is_none() || best_ask.is_none() {
+        if self.best_bid.is_none() || self.best_ask.is_none() {
             return None;
         }
 
-        Some(best_ask.unwrap() - best_bid.unwrap())
+        Some(self.best_ask.unwrap() - self.best_bid.unwrap())
     }
 
     fn get_best_bid(&self) -> Option<Price> {
-        // the best bid is the highest price, so the last one
-        if self.bids.len() == 0 {
-            return None;
-        }
-
-        Some(self.bids[self.bids.len() - 1].0)
+        self.best_bid
     }
 
     fn get_best_ask(&self) -> Option<Price> {
-        // the best ask is the lowest price, so the first one
-        if self.asks.len() == 0 {
-            return None;
-        }
-
-        Some(self.asks[0].0)
+        self.best_ask
     }
 
     fn get_quantity_at(&self, price: Price, side: Side) -> Option<Quantity> {
-        let levels = if side == Side::Bid {
-            &self.bids
-        } else {
-            &self.asks
-        };
-
-        let i = Self::find_index(levels, price);
-
-        if i < levels.len() && levels[i].0 == price {
-            return Some(levels[i].1);
+        if !self.is_in_range(price) {
+            return None;
         }
 
-        None
+        let i = (price - self.base_price) as usize;
+
+        let quantity = if side == Side::Bid {
+            self.bid_quantities[i]
+        } else {
+            self.ask_quantities[i]
+        };
+
+        if quantity == 0 {
+            return None;
+        }
+
+        Some(quantity)
     }
 
     fn get_top_levels(&self, side: Side, n: usize) -> Vec<(Price, Quantity)> {
         let mut levels = Vec::new();
 
         if side == Side::Bid {
-            // bids: start from the end of the list
-            for i in 0..self.bids.len() {
+            if self.best_bid.is_none() {
+                return levels;
+            }
+
+            // bids: start from the best bid and go down
+            let start = (self.best_bid.unwrap() - self.base_price) as usize;
+
+            for k in 0..=start {
                 if levels.len() == n {
                     break;
                 }
 
-                levels.push(self.bids[self.bids.len() - 1 - i]);
+                let j = start - k;
+
+                if self.bid_quantities[j] > 0 {
+                    levels.push((self.base_price + j as Price, self.bid_quantities[j]));
+                }
             }
         } else {
-            // asks: start from the beginning of the list
-            for i in 0..self.asks.len() {
+            if self.best_ask.is_none() {
+                return levels;
+            }
+
+            // asks: start from the best ask and go up
+            let start = (self.best_ask.unwrap() - self.base_price) as usize;
+
+            for j in start..self.ask_quantities.len() {
                 if levels.len() == n {
                     break;
                 }
 
-                levels.push(self.asks[i]);
+                if self.ask_quantities[j] > 0 {
+                    levels.push((self.base_price + j as Price, self.ask_quantities[j]));
+                }
             }
         }
 
@@ -159,16 +278,16 @@ impl OrderBook for OrderBookImpl {
     }
 
     fn get_total_quantity(&self, side: Side) -> Quantity {
-        let levels = if side == Side::Bid {
-            &self.bids
+        let quantities = if side == Side::Bid {
+            &self.bid_quantities
         } else {
-            &self.asks
+            &self.ask_quantities
         };
 
         let mut total = 0;
 
-        for i in 0..levels.len() {
-            total += levels[i].1;
+        for i in 0..quantities.len() {
+            total += quantities[i];
         }
         total
     }
