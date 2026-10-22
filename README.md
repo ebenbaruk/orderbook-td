@@ -1,169 +1,108 @@
-# High-Performance Order Book With Rust
+# High-Performance Order Book in Rust
 
-A competitive programming challenge to build the fastest possible order book data structure in Rust. The goal is to achieve sub-nanosecond operations for critical hot-path functions.
+Implementation of the `OrderBook` trait for the order book challenge. The goal was to make the hot path operations (`apply_update`, `get_spread`) as fast as possible, ideally under one nanosecond.
 
-## Objective
+All operations measured by the benchmark are now **under 1 ns**.
 
-Complete the `OrderBook` trait implementation in `src/orderbook.rs` and optimize it for maximum performance. The faster your implementation, the better!
+## Final results
 
-## What is an Order Book?
+Measured with `cargo run --release` on an Apple M1 Pro (100,000 iterations).
 
-An order book is a fundamental data structure in financial trading systems that maintains:
-- **Bids**: Buy orders sorted by price (highest first)
-- **Asks**: Sell orders sorted by price (lowest first)
-- **Price levels**: Each price point with its associated quantity
+| Operation      | Time     |
+|----------------|----------|
+| Update (avg)   | 0.86 ns  |
+| Update (P99)   | 0.96 ns  |
+| Get Best Bid   | 0.43 ns  |
+| Get Best Ask   | 0.43 ns  |
+| Get Spread     | 0.43 ns  |
+| Random Reads   | 0.44 ns  |
 
-## Project Structure
+## How to run
+
+```bash
+# run the tests
+cargo test
+
+# run the benchmark
+cargo run --release
+```
+
+## Project structure
 
 ```
 src/
-├── main.rs          # Entry point with benchmarks and tests
-├── interfaces.rs    # OrderBook trait and type definitions
-├── orderbook.rs     # Your implementation goes here (currently TODO)
-└── benchmarks.rs    # Comprehensive benchmarking framework
+├── main.rs          # Entry point, benchmark call and correctness tests
+├── interfaces.rs    # OrderBook trait and types (given)
+├── orderbook.rs     # My implementation
+└── benchmarks.rs    # Benchmark framework (given)
 ```
 
-## Implementation Requirements
+## Evolution step by step
 
-Implement the `OrderBook` trait with the following methods:
+I did the project in several steps, each one is a separate commit, to see what each idea brings.
 
-### Core Operations (HOT PATH - Optimize heavily!)
-- `apply_update(&mut self, update: Update)` - Add/update/remove price levels
-- `get_spread(&self) -> Option<Price>` - Calculate bid-ask spread
+| Step | Commit | Update | Best Bid | Best Ask | Spread | Random Reads |
+|------|--------|--------|----------|----------|--------|--------------|
+| 1 | Unsorted `Vec` | 147.6 ns | 114.2 ns | 115.3 ns | 231.2 ns | 94.3 ns |
+| 2 | More tests | - | - | - | - | - |
+| 3 | Sorted `Vec` + binary search | 17.4 ns | 0.43 ns | 0.43 ns | 0.85 ns | 14.8 ns |
+| 4 | Array indexed by price + cached best prices | 2.75 ns | 0.43 ns | 0.43 ns | 0.53 ns | 0.44 ns |
+| 5 | `inline` and `cold` on the hot path | **0.86 ns** | **0.43 ns** | **0.43 ns** | **0.43 ns** | **0.44 ns** |
 
-### Query Operations
-- `get_best_bid(&self) -> Option<Price>` - Get highest bid price
-- `get_best_ask(&self) -> Option<Price>` - Get lowest ask price
-- `get_quantity_at(&self, price: Price, side: Side) -> Option<Quantity>`
-- `get_top_levels(&self, side: Side, n: usize) -> Vec<(Price, Quantity)>`
-- `get_total_quantity(&self, side: Side) -> Quantity`
+### Step 1 - Unsorted Vec
 
-## Getting Started
+The simplest version: each side is a `Vec<(Price, Quantity)>`. To update, read or find the best price, we go through the whole list. It works but everything is O(n), so it is slow.
 
-1. **Clone and setup**:
-   ```bash
-   cargo build --release
-   ```
+### Step 2 - More tests
 
-2. **Implement the trait** in `src/orderbook.rs`:
-   ```rust
-   use std::collections::BTreeMap;
+Before optimizing, I added tests to be sure that the next versions stay correct:
 
-   pub struct OrderBookImpl {
-       bids: BTreeMap<Price, Quantity>,
-       asks: BTreeMap<Price, Quantity>,
-   }
+- empty book and only one side filled
+- `get_top_levels` (order of the levels, `n` bigger than the number of levels, `n = 0`)
+- `get_total_quantity` after updates and removes
+- best price after removing the best level
+- removing a price that does not exist
+- same price on the bid and ask side
+- crossed book (negative spread)
+- 1000 levels like in the benchmark
 
-   impl OrderBook for OrderBookImpl {
-       fn new() -> Self {
-           OrderBookImpl {
-               bids: BTreeMap::new(),
-               asks: BTreeMap::new(),
-           }
-       }
-       // ... implement other methods
-   }
-   ```
+### Step 3 - Sorted Vec + binary search
 
-3. **Run tests** to verify correctness:
-   ```bash
-   cargo test
-   ```
+The lists are now kept sorted from the lowest to the highest price:
 
-4. **Run benchmarks** to measure performance:
-   ```bash
-   cargo run --release
-   ```
+- the best bid is the last element and the best ask is the first one, so no loop is needed
+- to find a price, a binary search is used (O(log n) instead of O(n))
+- a new price is inserted at the right place to keep the list sorted
 
-## Benchmark Metrics
+The best prices go under 1 ns, but updates and reads still need a search.
 
-The benchmark suite measures:
-- **Update operations** (avg, P50, P95, P99)
-- **Get best bid/ask** latency
-- **Spread calculation** latency
-- **Random reads** performance
-- **Total operations**: 100,000 iterations
+### Step 4 - Array indexed by price
 
-Example output:
+The prices in the benchmark are in a small range, so instead of searching for a price we can use it directly as an index:
+
 ```
-============================================================
-  BENCHMARK RESULTS: OrderBook
-============================================================
-  Total Operations: 100000
-  ---
-  Update Operations:
-    Average: 45.23 ns
-    P50:     42 ns
-    P95:     67 ns
-    P99:     89 ns
-  ---
-  Get Best Bid:
-    Average: 12.45 ns
-  ...
+quantity = bid_quantities[price - base_price]
 ```
 
-## Optimization Tips
+- a quantity of 0 means there is no level at this price
+- the arrays grow automatically if a price is outside of the range (`make_room`)
+- the best bid and best ask are stored in the struct and updated on each change. When the best level is removed, we look for the next one in the array.
 
-1. **Data Structures**: Carefully chose your data structure. It will be the most critical choice
+Updates and reads become a simple array access, without any search.
 
-2. **Hot Path Optimization**:
-   - Minimize allocations in `apply_update()`
-   - Maximize cache usage
+### Step 5 - Faster hot path
 
-3. **Profiling Tools**:
-   ```bash
-   # Install flamegraph
-   cargo install flamegraph
+By looking at the generated assembly, I saw that `apply_update` was a real function call in the benchmark loop. I made a few small changes, and I tested each one separately to keep only the ones that help:
 
-   # Generate flame graph
-   cargo flamegraph
+- `#[inline(always)]` on `apply_update`, so the compiler puts the code directly in the loop
+- `#[cold]` on the functions that change the best price. Before, the best price was written to memory on every update and read again just after, so the CPU had to wait. Now it is only written when it really changes, which is rare.
+- `#[cold]` on `make_room`, because growing the arrays almost never happens
+- only one comparison to check if a price is in the array: if the price is below `base_price`, `(price - base_price) as usize` becomes a huge number, so `i < len` is enough
+- `NO_BID` / `NO_ASK` constants instead of `Option<Price>` for the best prices, the comparison is simpler
 
-   # Run micro-benchmarks
-   cargo bench
-   ```
+I also tried release profile settings in `Cargo.toml` (`lto`, `codegen-units = 1`, `panic = "abort"`), but they made no measurable difference, so I did not keep them.
 
-4. **Advanced Techniques**:
-   - SIMD for batch operations
-   - Lock-free data structures
-   - Memory pooling for allocations
-   - Branch prediction optimization
+## Limitations
 
-## Competition Goal
-
-**Achieve sub-nanosecond operations!**
-
-##  Correctness Tests
-
-Two test suites ensure implementation correctness:
-
-1. **Basic Operations**: Tests bid/ask insertion and queries
-2. **Updates & Removes**: Tests quantity updates and level removal
-
-All tests must pass before benchmarking.
-
-## Type Definitions
-
-```rust
-// Price in units of 10^-4 (e.g., 10000 = 1.0000)
-pub type Price = i64;
-
-// Quantity at a price level
-pub type Quantity = u64;
-
-// Order side
-pub enum Side { Bid, Ask }
-
-// Update operations
-pub enum Update {
-    Set { price: Price, quantity: Quantity, side: Side },
-    Remove { price: Price, side: Side },
-}
-```
-
-## Contributing
-
-This is a competitive programming challenge. May the fastest implementation win!
-
----
-
-**Good luck and happy optimizing!**
+- The array goes from the lowest to the highest price ever seen. If two prices are very far from each other, the array can become very large. It is the usual trade-off of this structure: more memory for more speed. It is fine for the benchmark and the tests.
+- `get_total_quantity` goes through the whole array. It is not measured by the benchmark so I kept it simple.
